@@ -1,6 +1,6 @@
 # Rust Based HTTP Requester
 
-##Hour 1 — Project setup & dependencies
+## Hour 1 — Project setup & dependencies
 
 ### Create the project:
 
@@ -21,7 +21,7 @@ Create skeleton main.rs with tokio::main and a Cli struct using clap.
 
 Run cargo run to confirm the binary builds.
 
-##Hour 2 — Basic GET request (async)
+## Hour 2 — Basic GET request (async)
 
 Implement a minimal async GET using reqwest:
 
@@ -40,7 +40,7 @@ println!("{}", &text[..text.len().min(500)]);
 
 Concepts: async fn, .await, Result propagation with ?.
 
-##Hour 3 — Pretty-print headers & status, handle errors
+## Hour 3 — Pretty-print headers & status, handle errors
 
 Print response headers and content-length if present.
 
@@ -50,7 +50,7 @@ Handle non-UTF8 bodies gracefully (show as bytes or try text().await with fallba
 
 Log concise errors for invalid URLs, network failures, timeouts.
 
-##Hour 4 — Add CLI options: method, headers, body
+## Hour 4 — Add CLI options: method, headers, body
 
 Extend Cli (clap) to accept:
 
@@ -70,7 +70,7 @@ let builder = client.request(method, &url);
 let builder = headers.iter().fold(builder, |b, (k,v)| b.header(k, v));
 let res = if let Some(body) = body { builder.body(body).send().await? } else { builder.send().await? };
 
-##Hour 5 — POST with JSON and form support
+## Hour 5 — POST with JSON and form support
 
 Add flags to choose body type:
 
@@ -84,7 +84,7 @@ Validate JSON input and give helpful errors.
 
 Concept: use serde_json::Value if you want to parse/validate JSON before sending.
 
-##Hour 6 — Timeouts, retries, and status mapping
+## Hour 6 — Timeouts, retries, and status mapping
 
 Configure client-level timeouts and retry logic:
 
@@ -96,7 +96,7 @@ Add exit codes based on status (e.g., non-2xx → non-zero exit code).
 
 Track response time using tokio::time::Instant to print latency.
 
-##Hour 7 — Save response to disk & streaming large bodies
+## Hour 7 — Save response to disk & streaming large bodies
 
 Implement --output <file> which writes the response to disk.
 
@@ -111,7 +111,7 @@ while let Some(chunk) = stream.next().await {
 
 Concepts: streaming, tokio::io::AsyncWrite vs blocking std::fs::File with tokio::task::spawn_blocking if needed.
 
-##Hour 8 — Concurrency & multiple URLs
+## Hour 8 — Concurrency & multiple URLs
 
 Add support for multiple URLs in one command and make concurrent requests.
 
@@ -121,7 +121,7 @@ Limit concurrency with buffer_unordered or a semaphore.
 
 Collect results and print a summary table (URL, status, time, bytes).
 
-##Hour 9 — Add advanced features (auth, cookies, redirects)
+## Hour 9 — Add advanced features (auth, cookies, redirects)
 
 Add optional flags:
 
@@ -135,7 +135,7 @@ Cookie jar support (if desired)
 
 Add an option to print response as raw (incl. chunked transfer encoding) vs prettified.
 
-##Hour 10 — Polish, logging, tests, and stretch
+## Hour 10 — Polish, logging, tests, and stretch
 
 Add logging with tracing/env_logger to trace requests, headers, and retries.
 
