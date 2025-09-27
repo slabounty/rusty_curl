@@ -5,11 +5,11 @@ use anyhow::Result;
 use clap::{Parser as ClapParser, ValueEnum};
 use log::{info};
 use env_logger::Env;
-use reqwest::Client;
+use reqwest::{Client, Method};
 
 // Define an enum for a specific argument's possible values
 #[derive(Debug, Clone, ValueEnum)]
-enum Method {
+enum CliMethod {
     Get,
     Post,
     Put,
@@ -32,8 +32,8 @@ struct Cli {
     headers: Vec<(String, String)>,
 
     // Choose a method
-    #[arg(short, long, value_enum, default_value_t = Method::Get)]
-    method: Method,
+    #[arg(short, long, value_enum, default_value_t = CliMethod::Get)]
+    method: CliMethod,
 
     url: String,
 }
@@ -63,10 +63,10 @@ async fn main() -> Result<()> {
     let client = reqwest::Client::new();
 
     let http_result = match cli.method {
-        Method::Get => get_request(&client, &url, &cli.headers).await?,
-        Method::Post => post_request(&client, &url, cli.body.as_deref(), &cli.headers).await?,
-        Method::Put => put_request(&client, &url, cli.body.as_deref(), &cli.headers).await?,
-        Method::Delete => delete_request(&client, &url, &cli.headers).await?,
+        CliMethod::Get => request(&client, &url, Method::GET, None, &cli.headers).await?,
+        CliMethod::Post => request(&client, &url, Method::POST, cli.body.as_deref(), &cli.headers).await?,
+        CliMethod::Put => request(&client, &url, Method::PUT, cli.body.as_deref(), &cli.headers).await?,
+        CliMethod::Delete => request(&client, &url, Method::DELETE, None, &cli.headers).await?,
     };
 
     // Check for valid status response
@@ -104,96 +104,29 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
     Ok((key, value))
 }
 
-async fn get_request(client: &Client, url: &str, headers: &[(String, String)]) -> Result<HttpResult> {
-    use reqwest::Method; // import reqwest's Method
-
-    // Start request builder
-    let mut builder = client.request(Method::GET, url);
+async fn request(client: &Client, url: &str, method: Method, body: Option<&str>, headers: &[(String, String)]) -> Result<HttpResult> {
+    info!("Request: method = {}", method);
+    let mut builder = client.request(method, url);
 
     // Add headers
+    info!("Request: adding headers");
     for (key, value) in headers {
         builder = builder.header(key, value);
     }
 
-    // Send request
-    let resp = builder.send().await?;let status = resp.status();
-    let headers = resp.headers().clone();
-    let content_length = resp.content_length();
-    let body = resp.text().await?;
-
-    Ok(HttpResult { status, headers, content_length, body })
-}
-
-async fn post_request(client: &Client, url: &str, body: Option<&str>, headers: &[(String, String)]) -> Result<HttpResult> {
-    use reqwest::Method; // import reqwest's Method
-    let mut builder = client.request(Method::POST, url);
-
-    // Add headers
-    for (key, value) in headers {
-        builder = builder.header(key, value);
-    }
-
+    info!("Request: checking body");
     if let Some(b) = body {
         builder = builder.body(b.to_string());
     }
 
+    info!("Request: calling send");
     let resp = builder.send().await?;
     let status = resp.status();
     let headers = resp.headers().clone();
     let content_length = resp.content_length();
     let body = resp.text().await?;
 
-    Ok(HttpResult {
-        status,
-        headers,
-        content_length,
-        body,
-    })
-}
-
-async fn put_request(client: &Client, url: &str, body: Option<&str>, headers: &[(String, String)]) -> Result<HttpResult> {
-    use reqwest::Method; // import reqwest's Method
-
-    let mut builder = client.request(Method::PUT, url);
-
-    // Add headers
-    for (key, value) in headers {
-        builder = builder.header(key, value);
-    }
-
-    if let Some(b) = body {
-        builder = builder.body(b.to_string());
-    }
-
-    let resp = builder.send().await?;
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let content_length = resp.content_length();
-    let body = resp.text().await?;
-
-    Ok(HttpResult {
-        status,
-        headers,
-        content_length,
-        body,
-    })
-}
-
-async fn delete_request(client: &Client, url: &str, headers: &[(String, String)]) -> Result<HttpResult> {
-    use reqwest::Method; // import reqwest's Method
-    let mut builder = client.request(Method::DELETE, url);
-
-    // Add headers
-    for (key, value) in headers {
-        builder = builder.header(key, value);
-    }
-
-    let resp = builder.send().await?;
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let content_length = resp.content_length();
-    let body = resp.text().await?;
-
+    info!("Request: returning result");
     Ok(HttpResult {
         status,
         headers,
@@ -216,6 +149,147 @@ fn valid_url(url: &str) -> bool {
 mod tests {
     use super::*;
     use reqwest::Client;
+    use httpmock::prelude::*;
+
+    #[tokio::test]
+    async fn test_get_request_returns_body_mock() {
+        // Start a mock server on a random local port
+        let server = MockServer::start_async().await;
+
+        // Define what the mock server should return
+        let mock = server.mock_async(|when, then| {
+            when.method(GET)
+                .path("/get")
+                .header("Accept", "application/json");
+
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .body(r#"{ "url": "http://localhost/get" }"#);
+        }).await;
+
+        let client = Client::new();
+        let url = format!("{}/get", server.base_url());
+
+        let headers = vec![
+            ("Accept".to_string(), "application/json".to_string()),
+            ("User-Agent".to_string(), "rusty_curl_test".to_string()),
+        ];
+
+        // Call your own request function
+        let http_result = request(&client, &url, reqwest::Method::GET, None, &headers)
+            .await
+            .unwrap();
+
+        // Verify body contains mocked JSON
+        assert!(http_result.body.contains("\"url\": \"http://localhost/get\""));
+
+        // Verify that the mock was actually called
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_post_request_returns_body_mock() {
+        // 1. Start a local mock server
+        let server = MockServer::start();
+
+        // 2. Define the mock: it expects POST and responds with JSON
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/submit")
+                .header("Content-Type", "application/json")
+                .body(r#"{"hello":"world"}"#);
+            then.status(201)
+                .header("Content-Type", "application/json")
+                .body(r#"{"status":"ok"}"#);
+        });
+
+        // 3. Prepare the request
+        let client = Client::new();
+        let url = format!("{}/submit", &server.base_url());
+        let headers = vec![("Content-Type".into(), "application/json".into())];
+        let body = Some(r#"{"hello":"world"}"#);
+
+        // 4. Call your request function
+        let http_result = request(&client, &url, Method::POST, body, &headers)
+            .await
+            .expect("Request should succeed");
+
+        // 5. Verify the response your code processed
+        assert_eq!(http_result.status.as_u16(), 201);
+        assert!(http_result.body.contains(r#""status":"ok""#));
+        // Verify that the mock was actually called
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_put_request_returns_body_mock() {
+        // 1. Start a local mock server
+        let server = MockServer::start();
+
+        // 2. Define the mock: it expects PUT and responds with JSON
+        let mock = server.mock(|when, then| {
+            when.method(PUT)
+                .path("/submit")
+                .header("Content-Type", "application/json")
+                .body(r#"{"hello":"world"}"#);
+            then.status(201)
+                .header("Content-Type", "application/json")
+                .body(r#"{"status":"ok"}"#);
+        });
+
+        // 3. Prepare the request
+        let client = Client::new();
+        let url = format!("{}/submit", &server.base_url());
+        let headers = vec![("Content-Type".into(), "application/json".into())];
+        let body = Some(r#"{"hello":"world"}"#);
+
+        // 4. Call your request function
+        let http_result = request(&client, &url, Method::PUT, body, &headers)
+            .await
+            .expect("Request should succeed");
+
+        // 5. Verify the response your code processed
+        assert_eq!(http_result.status.as_u16(), 201);
+        assert!(http_result.body.contains(r#""status":"ok""#));
+        // Verify that the mock was actually called
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_delete_request_returns_body_mock() {
+        // Start a mock server on a random local port
+        let server = MockServer::start_async().await;
+
+        // Define what the mock server should return
+        let mock = server.mock_async(|when, then| {
+            when.method(DELETE)
+                .path("/delete")
+                .header("Accept", "application/json");
+
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .body(r#"{ "url": "http://localhost/delete" }"#);
+        }).await;
+
+        let client = Client::new();
+        let url = format!("{}/delete", server.base_url());
+
+        let headers = vec![
+            ("Accept".to_string(), "application/json".to_string()),
+            ("User-Agent".to_string(), "rusty_curl_test".to_string()),
+        ];
+
+        // Call your own request function
+        let http_result = request(&client, &url, reqwest::Method::DELETE, None, &headers)
+            .await
+            .unwrap();
+
+        // Verify body contains mocked JSON
+        assert!(http_result.body.contains("\"url\": \"http://localhost/delete\""));
+
+        // Verify that the mock was actually called
+        mock.assert_async().await;
+    }
 
     #[tokio::test]
     async fn test_get_request_returns_body() {
@@ -228,7 +302,7 @@ mod tests {
             ("User-Agent".to_string(), "rusty_curl_test".to_string()),
         ];
 
-        let http_result = get_request(&client, url, &headers).await.unwrap();
+        let http_result = request(&client, url, Method::GET, None, &headers).await.unwrap();
 
         assert!(http_result.body.contains("\"url\": \"https://httpbin.org/get\""));
     }
@@ -240,7 +314,7 @@ mod tests {
         // No headers
         let headers: Vec<(String, String)> = vec![];
 
-        let http_result = get_request(&client, url, &headers).await.unwrap();
+        let http_result = request(&client, url, Method::GET, None, &headers).await.unwrap();
 
         // httpbin returns JSON with a uuid field
         assert!(http_result.body.contains("uuid"));
@@ -255,7 +329,7 @@ mod tests {
         // No headers
         let headers: Vec<(String, String)> = vec![];
 
-        let http_result = post_request(&client, url, Some(body), &headers).await.unwrap();
+        let http_result = request(&client, url, Method::POST, Some(body), &headers).await.unwrap();
 
         assert!(http_result.body.contains("\"url\": \"https://httpbin.org/post\""));
         assert!(http_result.body.contains("hello world"));
@@ -270,7 +344,7 @@ mod tests {
         // No headers
         let headers: Vec<(String, String)> = vec![];
 
-        let http_result = put_request(&client, url, Some(body), &headers).await.unwrap();
+        let http_result = request(&client, url, Method::PUT, Some(body), &headers).await.unwrap();
 
         assert!(http_result.body.contains("\"url\": \"https://httpbin.org/put\""));
         assert!(http_result.body.contains("hello world"));
@@ -284,7 +358,7 @@ mod tests {
         // No headers
         let headers: Vec<(String, String)> = vec![];
 
-        let http_result = delete_request(&client, url, &headers).await.unwrap();
+        let http_result = request(&client, url, Method::DELETE, None, &headers).await.unwrap();
 
         assert!(http_result.body.contains("\"url\": \"https://httpbin.org/delete\""));
     }
