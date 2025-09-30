@@ -3,7 +3,7 @@ use std::io::{self, Write};
 
 use anyhow::Result;
 use clap::{Parser as ClapParser, ValueEnum};
-use log::{info, warn};
+use log::{info, warn, error};
 use env_logger::Env;
 use reqwest::{Client, Method};
 
@@ -19,7 +19,7 @@ enum CliMethod {
 #[derive(ClapParser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    // Sets an output file to write to (not currently implemented)
+    // Sets an output file to write to
     #[arg(short, long, value_name = "FILE")]
     output: Option<String>,
 
@@ -49,6 +49,41 @@ struct HttpResult {
     pub body: String,
 }
 
+#[derive(Debug, Default)]
+struct ValidationReport {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+impl ValidationReport {
+    fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    fn check_and_exit(&self) -> Result<()> {
+        if self.has_warnings() {
+            warn!("Warnings:");
+            for warn in &self.warnings {
+                warn!("  - {}", warn);
+            }
+        }
+
+        if self.has_errors() {
+            error!("Errors:");
+            for err in &self.errors {
+                error!("  - {}", err);
+            }
+            anyhow::bail!("Exiting with errors");
+        }
+
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
@@ -56,39 +91,19 @@ async fn main() -> Result<()> {
     info!("Rusty Curl");
 
     let cli = Cli::parse();
-    let url = cli.url;
 
-    // Check url is well formed
-    if !valid_url(&url) {
-        anyhow::bail!("Invalid URL: must start with http:// or https://");
-    }
+    let report = validate_cli(&cli);
 
-    // Warn if there's a body on a GET or DELETE
-    if ((cli.method == CliMethod::Get) || (cli.method == CliMethod::Delete)) && cli.body.is_some() {
-        warn!("Body not allowed for GET or DELETE");
-    }
-
-    // Check is there's both json and a body
-    if cli.body.is_some() && cli.json.is_some() {
-        anyhow::bail!("Can't have both a body and json");
-    }
-
-    // Check if there's json, that it's valid
-    if let Some(json) = &cli.json {
-        // Validate the JSON
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(json) {
-            anyhow::bail!("JSON is not valid: {}", e);
-        }
-    }
+    report.check_and_exit()?;
 
     // Create a reqwest client
     let client = reqwest::Client::new();
 
     let http_result = match cli.method {
-        CliMethod::Get => request(&client, &url, Method::GET, None, &cli.headers).await?,
-        CliMethod::Post => request(&client, &url, Method::POST, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
-        CliMethod::Put => request(&client, &url, Method::PUT, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
-        CliMethod::Delete => request(&client, &url, Method::DELETE, None, &cli.headers).await?,
+        CliMethod::Get => request(&client, &cli.url, Method::GET, None, &cli.headers).await?,
+        CliMethod::Post => request(&client, &cli.url, Method::POST, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
+        CliMethod::Put => request(&client, &cli.url, Method::PUT, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
+        CliMethod::Delete => request(&client, &cli.url, Method::DELETE, None, &cli.headers).await?,
     };
 
     // Check for valid status response
@@ -124,6 +139,35 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
     let key = s[..pos].trim().to_string();
     let value = s[pos + 1..].trim().to_string();
     Ok((key, value))
+}
+
+fn validate_cli(cli: &Cli) -> ValidationReport {
+    let mut report = ValidationReport::default();
+
+    // Check url is well formed
+    if !valid_url(&cli.url) {
+        report.errors.push("Invalid URL: must start with http:// or https://".to_string());
+    }
+
+    // Warn if there's a body on a GET or DELETE
+    if ((cli.method == CliMethod::Get) || (cli.method == CliMethod::Delete)) && cli.body.is_some() {
+        report.warnings.push("Body not allowed for GET or DELETE".to_string());
+    }
+
+    // Check is there's both json and a body
+    if cli.body.is_some() && cli.json.is_some() {
+       report.errors.push("Can't have both a body and json".to_string());
+    }
+
+    // Check if there's json, that it's valid
+    if let Some(json) = &cli.json {
+        // Validate the JSON
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(json) {
+            report.errors.push(format!("JSON is not valid: {}", e));
+        }
+    }
+
+    report
 }
 
 async fn request(client: &Client, url: &str, method: Method, body: Option<&str>, headers: &[(String, String)]) -> Result<HttpResult> {
