@@ -3,12 +3,12 @@ use std::io::{self, Write};
 
 use anyhow::Result;
 use clap::{Parser as ClapParser, ValueEnum};
-use log::{info};
+use log::{info, warn};
 use env_logger::Env;
 use reqwest::{Client, Method};
 
 // Define an enum for a specific argument's possible values
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, ValueEnum, PartialEq)]
 enum CliMethod {
     Get,
     Post,
@@ -26,6 +26,10 @@ struct Cli {
     // Sets a body
     #[arg(short, long, value_name = "BODY")]
     body: Option<String>,
+
+    // Sets a json
+    #[arg(short, long, value_name = "JSON")]
+    json: Option<String>,
 
     // Add headers (e.g. -H "Accept: application/json")
     #[arg(short = 'H', long = "header", value_parser = parse_key_val, num_args = 0..)]
@@ -59,13 +63,31 @@ async fn main() -> Result<()> {
         anyhow::bail!("Invalid URL: must start with http:// or https://");
     }
 
+    // Warn if there's a body on a GET or DELETE
+    if ((cli.method == CliMethod::Get) || (cli.method == CliMethod::Delete)) && cli.body.is_some() {
+        warn!("Body not allowed for GET or DELETE");
+    }
+
+    // Check is there's both json and a body
+    if cli.body.is_some() && cli.json.is_some() {
+        anyhow::bail!("Can't have both a body and json");
+    }
+
+    // Check if there's json, that it's valid
+    if let Some(json) = &cli.json {
+        // Validate the JSON
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(json) {
+            anyhow::bail!("JSON is not valid: {}", e);
+        }
+    }
+
     // Create a reqwest client
     let client = reqwest::Client::new();
 
     let http_result = match cli.method {
         CliMethod::Get => request(&client, &url, Method::GET, None, &cli.headers).await?,
-        CliMethod::Post => request(&client, &url, Method::POST, cli.body.as_deref(), &cli.headers).await?,
-        CliMethod::Put => request(&client, &url, Method::PUT, cli.body.as_deref(), &cli.headers).await?,
+        CliMethod::Post => request(&client, &url, Method::POST, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
+        CliMethod::Put => request(&client, &url, Method::PUT, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
         CliMethod::Delete => request(&client, &url, Method::DELETE, None, &cli.headers).await?,
     };
 
