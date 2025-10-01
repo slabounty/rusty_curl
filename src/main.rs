@@ -37,6 +37,10 @@ struct Cli {
     #[arg(short, long, value_name = "JSON")]
     json: Option<String>,
 
+    // Sets a form
+    #[arg(short, long, value_name = "FORM")]
+    form: Option<String>,
+
     // Add headers (e.g. -H "Accept: application/json")
     #[arg(short = 'H', long = "header", value_parser = parse_key_val, num_args = 0..)]
     headers: Vec<(String, String)>,
@@ -107,8 +111,8 @@ async fn main() -> Result<()> {
 
     let http_result = match cli.method {
         CliMethod::Get => request(&client, &cli.url, Method::GET, None, &cli.headers).await?,
-        CliMethod::Post => request(&client, &cli.url, Method::POST, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
-        CliMethod::Put => request(&client, &cli.url, Method::PUT, cli.json.as_deref().or(cli.body.as_deref()), &cli.headers).await?,
+        CliMethod::Post => request(&client, &cli.url, Method::POST, cli.json.as_deref().or(cli.body.as_deref()).or(cli.form.as_deref()), &cli.headers).await?,
+        CliMethod::Put => request(&client, &cli.url, Method::PUT, cli.json.as_deref().or(cli.body.as_deref()).or(cli.form.as_deref()), &cli.headers).await?,
         CliMethod::Delete => request(&client, &cli.url, Method::DELETE, None, &cli.headers).await?,
     };
 
@@ -155,14 +159,19 @@ fn validate_cli(cli: &Cli) -> ValidationReport {
         report.errors.push("Invalid URL: must start with http:// or https://".to_string());
     }
 
-    // Warn if there's a body on a GET or DELETE
-    if ((cli.method == CliMethod::Get) || (cli.method == CliMethod::Delete)) && cli.body.is_some() {
+    // Warn if there's a body/json/form on a GET or DELETE
+    if ((cli.method == CliMethod::Get) || (cli.method == CliMethod::Delete)) &&
+        (cli.body.is_some() || cli.json.is_some() || cli.form.is_some()) {
         report.warnings.push("Body not allowed for GET or DELETE".to_string());
     }
 
-    // Check is there's both json and a body
-    if cli.body.is_some() && cli.json.is_some() {
-       report.errors.push("Can't have both a body and json".to_string());
+    // Check if there's only one or zero of body, json, form
+    if [cli.body.as_ref(), cli.json.as_ref(), cli.form.as_ref()]
+        .iter()
+        .filter(|opt| opt.is_some())
+        .count() > 1
+    {
+        report.errors.push("Can't have more than one of body, json, and form".into());
     }
 
     // Check if there's json, that it's valid
@@ -173,6 +182,7 @@ fn validate_cli(cli: &Cli) -> ValidationReport {
         }
     }
 
+    // Return the generated report
     report
 }
 
@@ -572,8 +582,28 @@ mod tests {
         assert_eq!(report.has_errors(), true);
 
         assert!(
-            report.errors.iter().any(|e| e.contains("body and json")),
-            "Expected an warning containing 'body and json'"
+            report.errors.iter().any(|e| e.contains("Can't have more than one of body, json, and form")),
+            "Expected an error containing 'Can't have more than one of body, json, and form'"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_cli_form_and_body() -> Result<()> {
+        let mut cli = Cli::default();   // all fields defaulted
+        cli.url = "http://example.com".to_string();
+        cli.method = CliMethod::Post;
+        cli.body = Some("some body".to_string());
+        cli.form = Some("some form".to_string());
+
+        let report = validate_cli(&cli);
+
+        assert_eq!(report.has_errors(), true);
+
+        assert!(
+            report.errors.iter().any(|e| e.contains("Can't have more than one of body, json, and form")),
+            "Expected an error containing 'Can't have more than one of body, json, and form'"
         );
 
         Ok(())
