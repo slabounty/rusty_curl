@@ -1,25 +1,26 @@
 use std::fs::File;
 use std::io::{self, Write};
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser as ClapParser, ValueEnum};
 use log::{info, warn, error};
 use env_logger::Env;
 use reqwest::{Client, Method};
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
+use tokio::time::Instant;
+
+const REQUEST_TIMEOUT: u64 = 10;
 
 // Define an enum for a specific argument's possible values
-#[derive(Debug, Clone, ValueEnum, PartialEq)]
+#[derive(Default, Debug, Clone, ValueEnum, PartialEq)]
 enum CliMethod {
+    #[default]
     Get,
     Post,
     Put,
     Delete
-}
-
-impl Default for CliMethod {
-    fn default() -> Self {
-        CliMethod::Get
-    }
 }
 
 #[derive(ClapParser, Default)]
@@ -49,6 +50,10 @@ struct Cli {
     #[arg(short, long, value_enum, default_value_t = CliMethod::Get)]
     method: CliMethod,
 
+    // Print latency
+    #[arg(short, long, value_name = "LATENCY")]
+    latency: bool,
+
     url: String,
 }
 
@@ -57,6 +62,7 @@ struct HttpResult {
     pub headers: reqwest::header::HeaderMap,
     pub content_length: Option<u64>,
     pub body: String,
+    pub latency: Duration,
 }
 
 #[derive(Debug, Default)]
@@ -106,8 +112,7 @@ async fn main() -> Result<()> {
 
     report.check_and_exit()?;
 
-    // Create a reqwest client
-    let client = reqwest::Client::new();
+    let client = make_client();
 
     let http_result = match cli.method {
         CliMethod::Get => request(&client, &cli.url, Method::GET, None, &cli.headers).await?,
@@ -116,29 +121,49 @@ async fn main() -> Result<()> {
         CliMethod::Delete => request(&client, &cli.url, Method::DELETE, None, &cli.headers).await?,
     };
 
-    // Check for valid status response
-    if !http_result.status.is_success() {
-        anyhow::bail!("Request failed with status: {}", http_result.status);
-    }
-
     if let Some(output_file) = cli.output {
         let mut file = File::create(output_file)?;
-        write_result(&mut file, &http_result)?;
+        write_result(&mut file, &http_result, cli.latency)?;
     }
     else {
         let mut stdout = io::stdout();
-        write_result(&mut stdout, &http_result)?;
+        write_result(&mut stdout, &http_result, cli.latency)?;
+    }
+
+    // Set exit code based on status
+    if !http_result.status.is_success() {
+        // non-2xx → exit code 1
+        std::process::exit(1);
     }
 
     Ok(())
 }
 
+fn make_client() -> ClientWithMiddleware {
+    info!("make_client: Creating Client");
+
+    let base_client = Client::builder()
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT))
+        .build();
+
+    // Retry up to 3 times with increasing intervals between attempts.
+    let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
+
+    ClientBuilder::new(base_client.unwrap())
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build()
+}
+
 // A function that takes any type implementing the Write trait
-fn write_result<W: Write>(writer: &mut W, http_result: &HttpResult) -> io::Result<()> {
+fn write_result<W: Write>(writer: &mut W, http_result: &HttpResult, output_latency: bool) -> io::Result<()> {
     writeln!(writer, "Status: {}", http_result.status)?;
     writeln!(writer, "Content-Length: {:?}", http_result.content_length)?;
     writeln!(writer, "Headers: {:#?}", http_result.headers)?;
     writeln!(writer, "Body:\n{}", http_result.body)?;
+    if output_latency {
+        writeln!(writer, "Latency: {:?}", http_result.latency)?;
+    }
+
     writer.flush()?;
 
     Ok(())
@@ -186,7 +211,7 @@ fn validate_cli(cli: &Cli) -> ValidationReport {
     report
 }
 
-async fn request(client: &Client, url: &str, method: Method, body: Option<&str>, headers: &[(String, String)]) -> Result<HttpResult> {
+async fn request(client: &ClientWithMiddleware, url: &str, method: Method, body: Option<&str>, headers: &[(String, String)]) -> Result<HttpResult> {
     info!("Request: method = {}", method);
     let mut builder = client.request(method, url);
 
@@ -200,6 +225,7 @@ async fn request(client: &Client, url: &str, method: Method, body: Option<&str>,
     if let Some(b) = body {
         builder = builder.body(b.to_string());
     }
+    let start_time = Instant::now();
 
     info!("Request: calling send");
     let resp = builder.send().await?;
@@ -208,29 +234,26 @@ async fn request(client: &Client, url: &str, method: Method, body: Option<&str>,
     let content_length = resp.content_length();
     let body = resp.text().await?;
 
+    let latency = start_time.elapsed();
+
     info!("Request: returning result");
     Ok(HttpResult {
         status,
         headers,
         content_length,
         body,
+        latency,
     })
 }
 
 fn valid_url(url: &str) -> bool {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        true
-    }
-    else {
-        false
-    }
+    url.starts_with("http://") || url.starts_with("https://")
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reqwest::Client;
     use httpmock::prelude::*;
 
     #[tokio::test]
@@ -249,7 +272,7 @@ mod tests {
                 .body(r#"{ "url": "http://localhost/get" }"#);
         }).await;
 
-        let client = Client::new();
+        let client = make_client();
         let url = format!("{}/get", server.base_url());
 
         let headers = vec![
@@ -286,7 +309,7 @@ mod tests {
         });
 
         // 3. Prepare the request
-        let client = Client::new();
+        let client = make_client();
         let url = format!("{}/submit", &server.base_url());
         let headers = vec![("Content-Type".into(), "application/json".into())];
         let body = Some(r#"{"hello":"world"}"#);
@@ -320,7 +343,7 @@ mod tests {
         });
 
         // 3. Prepare the request
-        let client = Client::new();
+        let client = make_client();
         let url = format!("{}/submit", &server.base_url());
         let headers = vec![("Content-Type".into(), "application/json".into())];
         let body = Some(r#"{"hello":"world"}"#);
@@ -353,7 +376,7 @@ mod tests {
                 .body(r#"{ "url": "http://localhost/delete" }"#);
         }).await;
 
-        let client = Client::new();
+        let client = make_client();
         let url = format!("{}/delete", server.base_url());
 
         let headers = vec![
@@ -375,7 +398,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_request_returns_body() {
-        let client = Client::new();
+        let client = make_client();
         let url = "https://httpbin.org/get";
 
         // Manually define headers as Vec<(String, String)>
@@ -391,7 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_request_uuid() {
-        let client = Client::new();
+        let client = make_client();
         let url = "https://httpbin.org/uuid";
         // No headers
         let headers: Vec<(String, String)> = vec![];
@@ -404,7 +427,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_request_returns_body() {
-        let client = Client::new();
+        let client = make_client();
         let url = "https://httpbin.org/post";
         let body = "hello world";
 
@@ -419,7 +442,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_request_returns_body() {
-        let client = Client::new();
+        let client = make_client();
         let url = "https://httpbin.org/put";
         let body = "hello world";
 
@@ -434,7 +457,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_request_returns_body() {
-        let client = Client::new();
+        let client = make_client();
         let url = "https://httpbin.org/delete";
 
         // No headers
