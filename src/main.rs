@@ -16,7 +16,13 @@ enum CliMethod {
     Delete
 }
 
-#[derive(ClapParser)]
+impl Default for CliMethod {
+    fn default() -> Self {
+        CliMethod::Get
+    }
+}
+
+#[derive(ClapParser, Default)]
 #[command(version, about, long_about = None)]
 struct Cli {
     // Sets an output file to write to
@@ -443,6 +449,151 @@ mod tests {
         let url = "not_http://route/to/page";
 
         assert_eq!(valid_url(&url), false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_report_no_errors() -> Result<()> {
+        let report = ValidationReport::default();
+
+        assert_eq!(report.has_errors(), false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_report_has_errors() -> Result<()> {
+        let mut report = ValidationReport::default();
+
+        report.errors.push("Some error".to_string());
+
+        assert_eq!(report.has_errors(), true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_report_no_warnings() -> Result<()> {
+        let report = ValidationReport::default();
+
+        assert_eq!(report.has_warnings(), false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_report_has_warnings() -> Result<()> {
+        let mut report = ValidationReport::default();
+
+        report.warnings.push("Some warning".to_string());
+
+        assert_eq!(report.has_warnings(), true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_cli_valid_url() -> Result<()> {
+        let mut cli = Cli::default();   // all fields defaulted
+        cli.url = "https://example.com".to_string();
+
+        let report = validate_cli(&cli);
+
+        assert_eq!(report.has_errors(), false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_cli_invalid_url() -> Result<()> {
+        let mut cli = Cli::default();   // all fields defaulted
+        cli.url = "httpX://example.com".to_string();
+
+        let report = validate_cli(&cli);
+
+        assert_eq!(report.has_errors(), true);
+
+        assert!(
+            report.errors.iter().any(|e| e.contains("Invalid URL")),
+            "Expected an error containing 'Invalid URL'"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_cli_get_body() -> Result<()> {
+        let mut cli = Cli::default();   // all fields defaulted
+        cli.url = "http://example.com".to_string();
+        cli.body = Some("hello world".to_string());
+
+        let report = validate_cli(&cli);
+
+        assert_eq!(report.has_warnings(), true);
+
+        assert!(
+            report.warnings.iter().any(|e| e.contains("Body not allowed")),
+            "Expected an warning containing 'Body not allowed'"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_cli_delete_body() -> Result<()> {
+        let mut cli = Cli::default();   // all fields defaulted
+        cli.url = "http://example.com".to_string();
+        cli.method = CliMethod::Delete;
+        cli.body = Some("hello world".to_string());
+
+        let report = validate_cli(&cli);
+
+        assert_eq!(report.has_warnings(), true);
+
+        assert!(
+            report.warnings.iter().any(|e| e.contains("Body not allowed")),
+            "Expected an warning containing 'Body not allowed'"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_cli_json_and_body() -> Result<()> {
+        let mut cli = Cli::default();   // all fields defaulted
+        cli.url = "http://example.com".to_string();
+        cli.method = CliMethod::Post;
+        cli.body = Some("some body".to_string());
+        cli.json = Some("some json".to_string());
+
+        let report = validate_cli(&cli);
+
+        assert_eq!(report.has_errors(), true);
+
+        assert!(
+            report.errors.iter().any(|e| e.contains("body and json")),
+            "Expected an warning containing 'body and json'"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_cli_valid_json() -> Result<()> {
+        let mut cli = Cli::default();   // all fields defaulted
+        cli.url = "http://example.com".to_string();
+        cli.method = CliMethod::Post;
+        cli.json = Some("some not json".to_string());
+
+        let report = validate_cli(&cli);
+
+        assert_eq!(report.has_errors(), true);
+
+        assert!(
+            report.errors.iter().any(|e| e.contains("JSON is not valid")),
+            "Expected an warning containing 'JSON is not valid'"
+        );
 
         Ok(())
     }
