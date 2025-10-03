@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser as ClapParser, ValueEnum};
 use log::{info, warn, error};
 use env_logger::Env;
+//use futures::future::join_all;
 use reqwest::{Client, Method};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
@@ -54,7 +55,9 @@ struct Cli {
     #[arg(short, long, value_name = "LATENCY")]
     latency: bool,
 
-    url: String,
+    // One or more URLs to fetch
+    #[arg(value_name = "URL", required = true)]
+    urls: Vec<String>,
 }
 
 struct HttpResult {
@@ -114,25 +117,32 @@ async fn main() -> Result<()> {
 
     let client = make_client();
 
-    let http_result = match cli.method {
-        CliMethod::Get => request(&client, &cli.url, Method::GET, None, &cli.headers).await?,
-        CliMethod::Post => request(&client, &cli.url, Method::POST, cli.json.as_deref().or(cli.body.as_deref()).or(cli.form.as_deref()), &cli.headers).await?,
-        CliMethod::Put => request(&client, &cli.url, Method::PUT, cli.json.as_deref().or(cli.body.as_deref()).or(cli.form.as_deref()), &cli.headers).await?,
-        CliMethod::Delete => request(&client, &cli.url, Method::DELETE, None, &cli.headers).await?,
+    let results = request_many(&client, &cli.urls, cli.method, cli.json.as_deref().or(cli.body.as_deref()).or(cli.form.as_deref()), &cli.headers).await;
+
+    let mut writer: Box<dyn Write> = if let Some(path) = &cli.output {
+        Box::new(File::create(path)?)          // Box<File>
+    } else {
+        Box::new(io::stdout())                 // Box<Stdout>
     };
 
-    if let Some(output_file) = cli.output {
-        let mut file = File::create(output_file)?;
-        write_result(&mut file, &http_result, cli.latency)?;
-    }
-    else {
-        let mut stdout = io::stdout();
-        write_result(&mut stdout, &http_result, cli.latency)?;
+    let mut had_failure = false;
+    for (url, res) in cli.urls.iter().zip(results) {
+        match res {
+            Ok(resp) => {
+                write_result(&mut writer, &resp, cli.latency)?;  // use `resp`
+                if !resp.status.is_success() {
+                    eprintln!("Request to {} returned {}", url, resp.status);
+                    had_failure = true;
+                }
+            }
+            Err(e) => {
+                eprintln!("Request to {} failed: {}", url, e);
+                had_failure = true;
+            }
+        }
     }
 
-    // Set exit code based on status
-    if !http_result.status.is_success() {
-        // non-2xx → exit code 1
+    if had_failure {
         std::process::exit(1);
     }
 
@@ -179,9 +189,11 @@ fn parse_key_val(s: &str) -> Result<(String, String), String> {
 fn validate_cli(cli: &Cli) -> ValidationReport {
     let mut report = ValidationReport::default();
 
-    // Check url is well formed
-    if !valid_url(&cli.url) {
-        report.errors.push("Invalid URL: must start with http:// or https://".to_string());
+    // Check that urls are well formed
+    for url in cli.urls.iter() {
+        if !valid_url(&url) {
+            report.errors.push(format!("Invalid URL {}: must start with http:// or https://", url));
+        }
     }
 
     // Warn if there's a body/json/form on a GET or DELETE
@@ -209,6 +221,34 @@ fn validate_cli(cli: &Cli) -> ValidationReport {
 
     // Return the generated report
     report
+}
+
+async fn request_many(
+    client: &ClientWithMiddleware,
+    urls: &[String],
+    method: CliMethod,
+    body: Option<&str>,
+    headers: &[(String, String)],
+) -> Vec<anyhow::Result<HttpResult>> {
+    // Each item in the iterator becomes an async block that returns a future
+    let futures = urls.iter().map(|url| {
+        let client = client.clone(); // clone client so each future owns it
+        let url = url.clone();
+        let headers = headers.to_vec();
+        let body = body.map(|b| b.to_string());
+        let method = method.clone();
+
+        async move {
+            match method {
+                CliMethod::Get    => request(&client, &url, Method::GET,    None,              &headers).await,
+                CliMethod::Post   => request(&client, &url, Method::POST,   body.as_deref(),   &headers).await,
+                CliMethod::Put    => request(&client, &url, Method::PUT,    body.as_deref(),   &headers).await,
+                CliMethod::Delete => request(&client, &url, Method::DELETE, None,              &headers).await,
+            }
+        }
+    });
+
+    futures::future::join_all(futures).await
 }
 
 async fn request(client: &ClientWithMiddleware, url: &str, method: Method, body: Option<&str>, headers: &[(String, String)]) -> Result<HttpResult> {
@@ -529,7 +569,7 @@ mod tests {
     #[test]
     fn test_validate_cli_valid_url() -> Result<()> {
         let mut cli = Cli::default();   // all fields defaulted
-        cli.url = "https://example.com".to_string();
+        cli.urls.push("https://example.com".to_string());
 
         let report = validate_cli(&cli);
 
@@ -541,7 +581,7 @@ mod tests {
     #[test]
     fn test_validate_cli_invalid_url() -> Result<()> {
         let mut cli = Cli::default();   // all fields defaulted
-        cli.url = "httpX://example.com".to_string();
+        cli.urls.push("httpX://example.com".to_string());
 
         let report = validate_cli(&cli);
 
@@ -558,7 +598,7 @@ mod tests {
     #[test]
     fn test_validate_cli_get_body() -> Result<()> {
         let mut cli = Cli::default();   // all fields defaulted
-        cli.url = "http://example.com".to_string();
+        cli.urls.push("https://example.com".to_string());
         cli.body = Some("hello world".to_string());
 
         let report = validate_cli(&cli);
@@ -576,7 +616,7 @@ mod tests {
     #[test]
     fn test_validate_cli_delete_body() -> Result<()> {
         let mut cli = Cli::default();   // all fields defaulted
-        cli.url = "http://example.com".to_string();
+        cli.urls.push("https://example.com".to_string());
         cli.method = CliMethod::Delete;
         cli.body = Some("hello world".to_string());
 
@@ -595,7 +635,7 @@ mod tests {
     #[test]
     fn test_validate_cli_json_and_body() -> Result<()> {
         let mut cli = Cli::default();   // all fields defaulted
-        cli.url = "http://example.com".to_string();
+        cli.urls.push("https://example.com".to_string());
         cli.method = CliMethod::Post;
         cli.body = Some("some body".to_string());
         cli.json = Some("some json".to_string());
@@ -615,7 +655,7 @@ mod tests {
     #[test]
     fn test_validate_cli_form_and_body() -> Result<()> {
         let mut cli = Cli::default();   // all fields defaulted
-        cli.url = "http://example.com".to_string();
+        cli.urls.push("https://example.com".to_string());
         cli.method = CliMethod::Post;
         cli.body = Some("some body".to_string());
         cli.form = Some("some form".to_string());
@@ -635,7 +675,7 @@ mod tests {
     #[test]
     fn test_validate_cli_valid_json() -> Result<()> {
         let mut cli = Cli::default();   // all fields defaulted
-        cli.url = "http://example.com".to_string();
+        cli.urls.push("https://example.com".to_string());
         cli.method = CliMethod::Post;
         cli.json = Some("some not json".to_string());
 
