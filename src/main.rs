@@ -295,6 +295,7 @@ fn valid_url(url: &str) -> bool {
 mod tests {
     use super::*;
     use httpmock::prelude::*;
+    use httpmock::{Mock, MockServer};
 
     #[tokio::test]
     async fn test_get_request_returns_body_mock() {
@@ -330,6 +331,56 @@ mod tests {
 
         // Verify that the mock was actually called
         mock.assert_async().await;
+    }
+
+    async fn build_mock<'a>(server: &'a MockServer, trailer: &str) -> Mock<'a> {
+        server
+        .mock_async(|when, then| {
+            when.method(GET)
+                .path(format!("/get{}", trailer))
+                .header("Accept", "application/json");
+
+            then.status(200)
+                .header("Content-Type", "application/json")
+                .body(format!(r#"{{ "url": "http://localhost/get{}" }}"#, trailer));
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_get_request_many_returns_bodys_mock() {
+        // Start a mock server on a random local port
+        let server = MockServer::start_async().await;
+
+        let mock_1 = build_mock(&server, "_1").await;
+        let mock_2 = build_mock(&server, "_2").await;
+
+        let client = make_client();
+
+        let mut urls: Vec<String> = Vec::new();
+        urls.push(format!("{}/get_1", server.base_url()));
+        urls.push(format!("{}/get_2", server.base_url()));
+
+        let headers = vec![
+            ("Accept".to_string(), "application/json".to_string()),
+            ("User-Agent".to_string(), "rusty_curl_test".to_string()),
+        ];
+
+        // Call your own request function
+        let http_results = request_many(&client, &urls, CliMethod::Get, None, &headers)
+            .await;
+
+        let http_result_1 = http_results[0].as_ref().expect("First request failed");
+        assert!(http_result_1.body.contains("\"url\": \"http://localhost/get_1\""));
+
+        let http_result_2 = http_results[1].as_ref().expect("First request failed");
+        assert!(http_result_2.body.contains("\"url\": \"http://localhost/get_2\""));
+
+        // Verify that the mock was actually called
+        mock_1.assert_async().await;
+
+        // Verify that the mock was actually called
+        mock_2.assert_async().await;
     }
 
     #[tokio::test]
