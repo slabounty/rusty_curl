@@ -5,8 +5,6 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Parser as ClapParser, ValueEnum};
 use log::{info, warn, error};
-use env_logger::Env;
-//use futures::future::join_all;
 use reqwest::{Client, Method};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
@@ -105,31 +103,44 @@ impl ValidationReport {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::init();
 
     info!("Rusty Curl");
 
     let cli = Cli::parse();
 
-    let report = validate_cli(&cli);
-
-    report.check_and_exit()?;
+    validate_cli(&cli).check_and_exit()?;
 
     let client = make_client();
 
-    let results = request_many(&client, &cli.urls, cli.method, cli.json.as_deref().or(cli.body.as_deref()).or(cli.form.as_deref()), &cli.headers).await;
+    let body = cli.json.as_deref()
+        .or(cli.body.as_deref())
+        .or(cli.form.as_deref());
+    let results = request_many(&client, &cli.urls, cli.method, body, &cli.headers).await;
 
-    let mut writer: Box<dyn Write> = if let Some(path) = &cli.output {
-        Box::new(File::create(path)?)          // Box<File>
-    } else {
-        Box::new(io::stdout())                 // Box<Stdout>
-    };
+    let writer = build_writer(&cli.output)?;
 
+    let had_failure = write_results(cli.urls, results, writer, cli.latency)?;
+
+    if had_failure {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+fn write_results(
+    urls: Vec<String>,
+    results: Vec<anyhow::Result<HttpResult>>,
+    mut writer: Box<dyn Write>,
+    latency: bool,
+) -> io::Result<bool> {
     let mut had_failure = false;
-    for (url, res) in cli.urls.iter().zip(results) {
+
+    for (url, res) in urls.iter().zip(results) {
         match res {
             Ok(resp) => {
-                write_result(&mut writer, &resp, cli.latency)?;  // use `resp`
+                write_result(&mut writer, &resp, latency)?;
                 if !resp.status.is_success() {
                     eprintln!("Request to {} returned {}", url, resp.status);
                     had_failure = true;
@@ -142,11 +153,17 @@ async fn main() -> Result<()> {
         }
     }
 
-    if had_failure {
-        std::process::exit(1);
-    }
+    Ok(had_failure)
+}
 
-    Ok(())
+fn build_writer(path: &Option<String>) -> io::Result<Box<dyn Write>> {
+    let writer: Box<dyn Write> = if let Some(path) = path {
+        Box::new(File::create(path)?) // use `?` to propagate errors
+    } else {
+        Box::new(io::stdout())        // directly box stdout
+    };
+
+    Ok(writer)
 }
 
 fn make_client() -> ClientWithMiddleware {
@@ -302,18 +319,9 @@ mod tests {
         // Start a mock server on a random local port
         let server = MockServer::start_async().await;
 
-        // Define what the mock server should return
-        let mock = server.mock_async(|when, then| {
-            when.method(GET)
-                .path("/get")
-                .header("Accept", "application/json");
-
-            then.status(200)
-                .header("Content-Type", "application/json")
-                .body(r#"{ "url": "http://localhost/get" }"#);
-        }).await;
-
         let client = make_client();
+        let mock = build_get_mock(&server, "").await;
+
         let url = format!("{}/get", server.base_url());
 
         let headers = vec![
@@ -333,7 +341,7 @@ mod tests {
         mock.assert_async().await;
     }
 
-    async fn build_mock<'a>(server: &'a MockServer, trailer: &str) -> Mock<'a> {
+    async fn build_get_mock<'a>(server: &'a MockServer, trailer: &str) -> Mock<'a> {
         server
         .mock_async(|when, then| {
             when.method(GET)
@@ -352,8 +360,8 @@ mod tests {
         // Start a mock server on a random local port
         let server = MockServer::start_async().await;
 
-        let mock_1 = build_mock(&server, "_1").await;
-        let mock_2 = build_mock(&server, "_2").await;
+        let mock_1 = build_get_mock(&server, "_1").await;
+        let mock_2 = build_get_mock(&server, "_2").await;
 
         let client = make_client();
 
