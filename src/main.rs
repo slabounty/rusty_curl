@@ -129,10 +129,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn write_results(
+fn write_results<W: Write>(
     urls: Vec<String>,
     results: Vec<anyhow::Result<HttpResult>>,
-    mut writer: Box<dyn Write>,
+    mut writer: W,
     latency: bool,
 ) -> io::Result<bool> {
     let mut had_failure = false;
@@ -311,8 +311,12 @@ fn valid_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::io::{Write, Read};
     use httpmock::prelude::*;
     use httpmock::{Mock, MockServer};
+    use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_get_request_returns_body_mock() {
@@ -748,5 +752,320 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_validation_report_errors() -> Result<()> {
+        let mut report = ValidationReport::default();
+
+        report.errors.push("Some Error".to_string());
+
+        assert_eq!(report.has_errors(), true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validation_report_warnings() -> Result<()> {
+        let mut report = ValidationReport::default();
+
+        report.warnings.push("Some Warning".to_string());
+
+        assert_eq!(report.has_warnings(), true);
+
+        Ok(())
+    }
+
+    // A minimal struct definition for tests (if not imported)
+    // Adjust if your actual struct has more fields.
+    fn make_report(warnings: Vec<&str>, errors: Vec<&str>) -> ValidationReport {
+        ValidationReport {
+            warnings: warnings.into_iter().map(String::from).collect(),
+            errors: errors.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn check_and_exit_returns_ok_if_no_warnings_or_errors() -> Result<()> {
+        let report = make_report(vec![], vec![]);
+        let result = report.check_and_exit();
+
+        assert!(result.is_ok(), "Expected Ok(()) when there are no warnings or errors");
+        Ok(())
+    }
+
+    #[test]
+    fn check_and_exit_returns_ok_with_warnings_only() -> Result<()> {
+        let report = make_report(vec!["deprecated flag"], vec![]);
+        let result = report.check_and_exit();
+
+        assert!(result.is_ok(), "Expected Ok(()) when there are only warnings");
+        Ok(())
+    }
+
+    #[test]
+    fn check_and_exit_returns_err_with_errors() {
+        let report = make_report(
+            vec!["deprecated flag"],
+            vec!["missing required argument"]
+        );
+        let result = report.check_and_exit();
+
+        assert!(result.is_err(), "Expected Err(_) when there are errors");
+    }
+
+    #[test]
+    fn build_writer_returns_stdout_when_none() {
+        // We can't easily inspect stdout itself, but we can check that it didn't error.
+        let writer = build_writer(&None);
+        assert!(writer.is_ok(), "Expected Ok(_) when path is None");
+    }
+
+    #[test]
+    fn build_writer_creates_file_when_path_given() -> std::io::Result<()> {
+        let dir = tempdir()?;                                   // create temp directory
+        let file_path = dir.path().join("out.txt");
+        let path_str = file_path.to_string_lossy().to_string();
+
+        {
+            let mut writer = build_writer(&Some(path_str.clone()))?;
+            writeln!(writer, "Hello test!")?;                  // write to the file
+        }
+
+        // Check that the file was created and contains the expected text
+        let mut contents = String::new();
+        fs::File::open(&file_path)?.read_to_string(&mut contents)?;
+        assert!(contents.contains("Hello test!"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_writer_fails_for_unwritable_path() {
+        // Try to write to an invalid directory (most likely will fail)
+        let path = "/root/should_fail.txt".to_string(); // adjust if test runner runs as root
+        let writer = build_writer(&Some(path));
+        assert!(writer.is_err(), "Expected Err(_) when path is unwritable");
+    }
+
+    #[test]
+    fn parse_key_val_valid_pair() {
+        let input = "Content-Type: application/json";
+        let result = parse_key_val(input).unwrap();
+        assert_eq!(result, ("Content-Type".to_string(), "application/json".to_string()));
+    }
+
+    #[test]
+    fn parse_key_val_trims_spaces() {
+        let input = "  key  :   value with spaces  ";
+        let result = parse_key_val(input).unwrap();
+        assert_eq!(result, ("key".to_string(), "value with spaces".to_string()));
+    }
+
+    #[test]
+    fn parse_key_val_handles_empty_value() {
+        let input = "key:";
+        let result = parse_key_val(input).unwrap();
+        assert_eq!(result, ("key".to_string(), "".to_string()));
+    }
+
+    #[test]
+    fn parse_key_val_handles_empty_key() {
+        let input = ":value";
+        let result = parse_key_val(input).unwrap();
+        assert_eq!(result, ("".to_string(), "value".to_string()));
+    }
+
+    #[test]
+    fn parse_key_val_error_no_colon() {
+        let input = "keyvalue";
+        let result = parse_key_val(input);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "invalid KEY:VALUE: no `:` found in `keyvalue`"
+        );
+    }
+
+    #[test]
+    fn parse_key_val_error_only_colon() {
+        let input = ":";
+        let result = parse_key_val(input).unwrap();
+        assert_eq!(result, ("".to_string(), "".to_string())); // still valid: empty key and value
+    }
+
+
+    fn sample_http_result() -> HttpResult {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+
+        HttpResult {
+            status: reqwest::StatusCode::OK,
+            content_length: Some(123),
+            headers, // <-- now a real HeaderMap
+            body: r#"{"message":"hello"}"#.to_string(),
+            latency: std::time::Duration::from_millis(42),
+        }
+    }
+
+    #[test]
+    fn test_write_results_all_success() {
+        // Arrange
+        let urls = vec![
+            "https://example.com/1".to_string(),
+            "https://example.com/2".to_string(),
+        ];
+
+        let results = vec![
+            Ok(sample_http_result()),
+            Ok(sample_http_result()),
+        ];
+
+        let mut buffer = Vec::new();
+
+        // Act
+        let had_failure =
+            write_results(urls, results, Box::new(&mut buffer), true).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert
+        assert_eq!(had_failure, false); // all were successful
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Content-Length: Some(123)"));
+        assert!(output.contains("application/json"));
+        assert!(output.contains(r#"{"message":"hello"}"#));
+        assert!(output.contains("Latency:")); // because latency flag is true
+    }
+
+    #[test]
+    fn test_write_results_with_failure() {
+        // Arrange
+        let urls = vec![
+            "https://good.example.com".to_string(),
+            "https://bad.example.com".to_string(),
+        ];
+
+        let mut bad_resp = sample_http_result();
+        bad_resp.status = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+
+        let results = vec![
+            Ok(sample_http_result()),         // first OK
+            Ok(bad_resp),                      // second has error status
+        ];
+
+        let mut buffer = Vec::new();
+
+        // Act
+        let had_failure =
+            write_results(urls, results, Box::new(&mut buffer), false).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert
+        assert_eq!(had_failure, true); // at least one failure
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Status: 500 Internal Server Error"));
+        assert!(output.contains(r#"{"message":"hello"}"#));
+        assert!(!output.contains("Latency:")); // latency flag is false here
+    }
+
+    #[test]
+    fn test_write_results_with_err_variant() {
+        // Arrange
+        let urls = vec![
+            "https://good.example.com".to_string(),
+            "https://error.example.com".to_string(),
+        ];
+
+        let results = vec![
+            Ok(sample_http_result()),                     // first OK
+            Err(anyhow::anyhow!("Network error")),        // second failed
+        ];
+
+        let mut buffer = Vec::new();
+
+        // Act
+        let had_failure =
+            write_results(urls, results, Box::new(&mut buffer), true).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert
+        assert_eq!(had_failure, true); // because of the Err
+        assert!(output.contains("Status: 200 OK")); // first result still written
+    }
+
+    #[test]
+    fn write_result_without_latency() {
+        let mut buffer: Vec<u8> = Vec::new();
+        let http_result = sample_http_result();
+
+        write_result(&mut buffer, &http_result, false).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Content-Length: Some(123)"));
+        assert!(output.contains(r#"Body:
+{"message":"hello"}"#));
+        assert!(!output.contains("Latency:")); // should NOT include latency
+    }
+
+    #[test]
+    fn write_result_with_latency() {
+        let mut buffer: Vec<u8> = Vec::new();
+        let http_result = sample_http_result();
+
+        write_result(&mut buffer, &http_result, true).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Latency:")); // should include latency now
+    }
+
+    #[test]
+    fn write_result_flushes_output() {
+        let mut buffer: Vec<u8> = Vec::new();
+        let http_result = sample_http_result();
+
+        // If flush wasn't called, some data could be missing
+        write_result(&mut buffer, &http_result, false).unwrap();
+
+        assert!(!buffer.is_empty(), "Buffer should contain written data");
+    }
+
+    #[test]
+    fn test_write_result_includes_all_fields() {
+        let mut buffer = Vec::new(); // this implements Write
+        let http_result = sample_http_result();
+
+        // Call write_result with latency enabled
+        write_result(&mut buffer, &http_result, true).unwrap();
+
+        // Convert buffer into a String
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert important fields appear
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Content-Length: Some(123)"));
+        assert!(output.contains("application/json"));
+        assert!(output.contains(r#"{"message":"hello"}"#));
+        assert!(output.contains("Latency:")); // because we enabled output_latency
+    }
+
+    #[test]
+    fn test_write_result_without_latency() {
+        let mut buffer = Vec::new();
+        let http_result = sample_http_result();
+
+        write_result(&mut buffer, &http_result, false).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        assert!(output.contains("Status: 200 OK"));
+        assert!(!output.contains("Latency:")); // no latency printed
     }
 }
