@@ -129,10 +129,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn write_results(
+fn write_results<W: Write>(
     urls: Vec<String>,
     results: Vec<anyhow::Result<HttpResult>>,
-    mut writer: Box<dyn Write>,
+    mut writer: W,
     latency: bool,
 ) -> io::Result<bool> {
     let mut had_failure = false;
@@ -912,6 +912,94 @@ mod tests {
     }
 
     #[test]
+    fn test_write_results_all_success() {
+        // Arrange
+        let urls = vec![
+            "https://example.com/1".to_string(),
+            "https://example.com/2".to_string(),
+        ];
+
+        let results = vec![
+            Ok(sample_http_result()),
+            Ok(sample_http_result()),
+        ];
+
+        let mut buffer = Vec::new();
+
+        // Act
+        let had_failure =
+            write_results(urls, results, Box::new(&mut buffer), true).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert
+        assert_eq!(had_failure, false); // all were successful
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Content-Length: Some(123)"));
+        assert!(output.contains("application/json"));
+        assert!(output.contains(r#"{"message":"hello"}"#));
+        assert!(output.contains("Latency:")); // because latency flag is true
+    }
+
+    #[test]
+    fn test_write_results_with_failure() {
+        // Arrange
+        let urls = vec![
+            "https://good.example.com".to_string(),
+            "https://bad.example.com".to_string(),
+        ];
+
+        let mut bad_resp = sample_http_result();
+        bad_resp.status = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+
+        let results = vec![
+            Ok(sample_http_result()),         // first OK
+            Ok(bad_resp),                      // second has error status
+        ];
+
+        let mut buffer = Vec::new();
+
+        // Act
+        let had_failure =
+            write_results(urls, results, Box::new(&mut buffer), false).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert
+        assert_eq!(had_failure, true); // at least one failure
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Status: 500 Internal Server Error"));
+        assert!(output.contains(r#"{"message":"hello"}"#));
+        assert!(!output.contains("Latency:")); // latency flag is false here
+    }
+
+    #[test]
+    fn test_write_results_with_err_variant() {
+        // Arrange
+        let urls = vec![
+            "https://good.example.com".to_string(),
+            "https://error.example.com".to_string(),
+        ];
+
+        let results = vec![
+            Ok(sample_http_result()),                     // first OK
+            Err(anyhow::anyhow!("Network error")),        // second failed
+        ];
+
+        let mut buffer = Vec::new();
+
+        // Act
+        let had_failure =
+            write_results(urls, results, Box::new(&mut buffer), true).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert
+        assert_eq!(had_failure, true); // because of the Err
+        assert!(output.contains("Status: 200 OK")); // first result still written
+    }
+
+    #[test]
     fn write_result_without_latency() {
         let mut buffer: Vec<u8> = Vec::new();
         let http_result = sample_http_result();
@@ -947,5 +1035,37 @@ mod tests {
         write_result(&mut buffer, &http_result, false).unwrap();
 
         assert!(!buffer.is_empty(), "Buffer should contain written data");
+    }
+
+    #[test]
+    fn test_write_result_includes_all_fields() {
+        let mut buffer = Vec::new(); // this implements Write
+        let http_result = sample_http_result();
+
+        // Call write_result with latency enabled
+        write_result(&mut buffer, &http_result, true).unwrap();
+
+        // Convert buffer into a String
+        let output = String::from_utf8(buffer).unwrap();
+
+        // Assert important fields appear
+        assert!(output.contains("Status: 200 OK"));
+        assert!(output.contains("Content-Length: Some(123)"));
+        assert!(output.contains("application/json"));
+        assert!(output.contains(r#"{"message":"hello"}"#));
+        assert!(output.contains("Latency:")); // because we enabled output_latency
+    }
+
+    #[test]
+    fn test_write_result_without_latency() {
+        let mut buffer = Vec::new();
+        let http_result = sample_http_result();
+
+        write_result(&mut buffer, &http_result, false).unwrap();
+
+        let output = String::from_utf8(buffer).unwrap();
+
+        assert!(output.contains("Status: 200 OK"));
+        assert!(!output.contains("Latency:")); // no latency printed
     }
 }
