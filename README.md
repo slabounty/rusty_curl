@@ -40,6 +40,24 @@ Options:
   -h, --help                   Print help  
   -V, --version                Print version  
 
+## Tests
+
+### All tests
+cargo test
+
+### Integration tests
+cargo test --test '*'
+
+### Unit tests
+cargo test --lib
+
+### Alias
+In my aliases, I have  
+`alias ct=cargo test`
+
+allowing just  
+`ct`
+
 ## Script
 There is one script in the scriptes directory. It's a naive search for
 public functions that don't need to be public. It works about 90% of the
