@@ -1,8 +1,58 @@
 # Rust Based HTTP Requester
 
-## Hour 1 — Project setup & dependencies
+A rust base curl like program. This was done mostly as a learning
+exercise in rust. There was pretty extensive use of chatGPT for much of
+the code as in "how do you do X in rust".
 
-### Create the project:
+## Examples
+### Get is the default  
+cr -- https://httpbin.org/get  -H "Accept: application/json" -H "User-Agent: rusty_curl"
+
+### With method included  
+cr -- https://httpbin.org/get --method get  -H "Accept: application/json" -H "User-Agent: rusty_curl"
+
+### Post method with body  
+cr -- https://httpbin.org/post --method post  -H "Accept: application/json" -H "User-Agent: rusty_curl" --body "hello world"
+
+### Put method with body  
+cr -- https://httpbin.org/put --method put -H "Accept: application/json" -H "User-Agent: rusty_curl" --body "hello world"
+
+### Post method with json (put will be similar)  
+cr -- https://httpbin.org/put --method post -H "Accept: application/json" -H "User-Agent: rusty_curl"  --json "{\"user\": \"some_user\"}"
+
+### Delete method  
+cr -- https://httpbin.org/delete --method delete   -H 'Accept: application/json' -H 'User-Agent: rusty_curl'
+
+## --help response
+Usage: rusty_curl [OPTIONS] <URL>...
+
+Arguments:  
+  <URL>...  
+  
+Options:  
+  -o, --output <FILE>  
+  -b, --body <BODY>  
+  -j, --json <JSON>  
+  -f, --form <FORM>  
+  -H, --header [<HEADERS>...]  
+  -m, --method <METHOD>        [default: get] [possible values: get, post, put, delete]  
+  -l, --latency  
+  -h, --help                   Print help  
+  -V, --version                Print version  
+
+## Script
+There is one script in the scriptes directory. It's a naive search for
+public functions that don't need to be public. It works about 90% of the
+time. If you truly need something like this, there's better ways to do
+it.
+
+## Original Plan
+
+Mostly did the plan but skipped hour 9.
+
+### Hour 1 — Project setup & dependencies
+
+#### Create the project:
 
 cargo new rusty_curl
 cd rusty_curl
@@ -21,7 +71,7 @@ Create skeleton main.rs with tokio::main and a Cli struct using clap.
 
 Run cargo run to confirm the binary builds.
 
-## Hour 2 — Basic GET request (async)
+### Hour 2 — Basic GET request (async)
 
 Implement a minimal async GET using reqwest:
 
@@ -40,7 +90,7 @@ println!("{}", &text[..text.len().min(500)]);
 
 Concepts: async fn, .await, Result propagation with ?.
 
-## Hour 3 — Pretty-print headers & status, handle errors
+### Hour 3 — Pretty-print headers & status, handle errors
 
 Print response headers and content-length if present.
 
@@ -50,7 +100,7 @@ Handle non-UTF8 bodies gracefully (show as bytes or try text().await with fallba
 
 Log concise errors for invalid URLs, network failures, timeouts.
 
-## Hour 4 — Add CLI options: method, headers, body
+### Hour 4 — Add CLI options: method, headers, body
 
 Extend Cli (clap) to accept:
 
@@ -70,7 +120,7 @@ let builder = client.request(method, &url);
 let builder = headers.iter().fold(builder, |b, (k,v)| b.header(k, v));
 let res = if let Some(body) = body { builder.body(body).send().await? } else { builder.send().await? };
 
-## Hour 5 — POST with JSON and form support
+### Hour 5 — POST with JSON and form support
 
 Add flags to choose body type:
 
@@ -84,7 +134,7 @@ Validate JSON input and give helpful errors.
 
 Concept: use serde_json::Value if you want to parse/validate JSON before sending.
 
-## Hour 6 — Timeouts, retries, and status mapping
+### Hour 6 — Timeouts, retries, and status mapping
 
 Configure client-level timeouts and retry logic:
 
@@ -96,7 +146,7 @@ Add exit codes based on status (e.g., non-2xx → non-zero exit code).
 
 Track response time using tokio::time::Instant to print latency.
 
-## Hour 7 — Save response to disk & streaming large bodies
+### Hour 7 — Save response to disk & streaming large bodies
 
 Implement --output <file> which writes the response to disk.
 
@@ -111,7 +161,7 @@ while let Some(chunk) = stream.next().await {
 
 Concepts: streaming, tokio::io::AsyncWrite vs blocking std::fs::File with tokio::task::spawn_blocking if needed.
 
-## Hour 8 — Concurrency & multiple URLs
+### Hour 8 — Concurrency & multiple URLs
 
 Add support for multiple URLs in one command and make concurrent requests.
 
@@ -121,7 +171,7 @@ Limit concurrency with buffer_unordered or a semaphore.
 
 Collect results and print a summary table (URL, status, time, bytes).
 
-## Hour 9 — Add advanced features (auth, cookies, redirects)
+### Hour 9 — Add advanced features (auth, cookies, redirects)
 
 Add optional flags:
 
@@ -135,7 +185,7 @@ Cookie jar support (if desired)
 
 Add an option to print response as raw (incl. chunked transfer encoding) vs prettified.
 
-## Hour 10 — Polish, logging, tests, and stretch
+### Hour 10 — Polish, logging, tests, and stretch
 
 Add logging with tracing/env_logger to trace requests, headers, and retries.
 
