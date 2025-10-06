@@ -10,7 +10,7 @@ pub_items=$(rg -w fn\|struct src | grep -w pub  | sed -E 's/.*(fn|struct)[[:spac
 # For each of the public items, count the number of files it appears in. If the count is
 # less than / equal to 1, then output that it's possibly unused.
 for item in $pub_items; do
-  hits=$(rg -lw $item src | sort -u | wc -l)
+  hits=$(rg -lw $item src tests | sort -u | wc -l)
 
   if [[ $hits -le 1 ]]; then
     echo "🚨 Possibly unused: $item"
